@@ -24,8 +24,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - defconfig: tulip-perf
-            device: tulip
           - defconfig: wayne-perf
             device: wayne
     defaults:
