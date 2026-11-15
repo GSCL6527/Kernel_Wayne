@@ -52,7 +52,10 @@ jobs:
           apt-get install -y -qq --no-install-recommends \
             bc bison build-essential ca-certificates ccache cpio curl \
             device-tree-compiler file flex git lib32z1 lib32stdc++6 libc6-i386 \
-            libelf-dev libncurses5 libssl-dev python3 rsync unzip xz-utils zip
+            libelf-dev libncurses5 libssl-dev python2 rsync unzip xz-utils zip
+          # AOSP gcc-4.9 driver is a python2 wrapper expecting /usr/bin/python
+          ln -sf /usr/bin/python2 /usr/bin/python
+          python --version
 
       - name: Fetch AOSP GCC 4.9 aarch64 toolchain
         run: |
@@ -61,8 +64,8 @@ jobs:
           rm -rf "$TC_DIR"
 
           URLS=(
-            "https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9"
             "https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9"
+            "https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9"
             "https://github.com/AOSPA/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9"
           )
           ok=0
