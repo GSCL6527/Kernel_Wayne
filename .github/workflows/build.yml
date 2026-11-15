@@ -28,6 +28,9 @@ jobs:
             device: tulip
           - defconfig: wayne-perf
             device: wayne
+    defaults:
+      run:
+        shell: bash
     env:
       ARCH: arm64
       SUBARCH: arm64
@@ -48,17 +51,37 @@ jobs:
           apt-get update -qq
           apt-get install -y -qq --no-install-recommends \
             bc bison build-essential ca-certificates ccache cpio curl \
-            device-tree-compiler flex git libelf-dev libncurses5 libssl-dev \
-            python3 rsync unzip xz-utils zip
+            device-tree-compiler file flex git lib32z1 lib32stdc++6 libc6-i386 \
+            libelf-dev libncurses5 libssl-dev python3 rsync unzip xz-utils zip
 
       - name: Fetch AOSP GCC 4.9 aarch64 toolchain
         run: |
+          set -euo pipefail
           TC_DIR=/tmp/toolchain
-          git clone --depth 1 \
-            https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9 \
-            "$TC_DIR" >/dev/null 2>&1
-          echo "CROSS_COMPILE=$TC_DIR/bin/aarch64-linux-android-" >> "$GITHUB_ENV"
+          rm -rf "$TC_DIR"
+
+          URLS=(
+            "https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9"
+            "https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9"
+            "https://github.com/AOSPA/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9"
+          )
+          ok=0
+          for url in "${URLS[@]}"; do
+            echo "--> trying $url"
+            if git clone --depth 1 "$url" "$TC_DIR" 2>&1 | tail -3; then
+              if [ -d "$TC_DIR/bin" ]; then ok=1; break; fi
+            fi
+            rm -rf "$TC_DIR"
+          done
+          if [ "$ok" != "1" ]; then echo "::error::could not fetch any aarch64 toolchain"; exit 1; fi
+
+          echo "--- toolchain bin ---"
+          ls -la "$TC_DIR/bin" | head -15
+          echo "--- file type ---"
+          file "$TC_DIR/bin/aarch64-linux-android-gcc" || true
           "$TC_DIR/bin/aarch64-linux-android-gcc" --version | head -1
+
+          echo "CROSS_COMPILE=$TC_DIR/bin/aarch64-linux-android-" >> "$GITHUB_ENV"
 
       - name: Restore ccache
         uses: actions/cache@v4
@@ -70,16 +93,14 @@ jobs:
 
       - name: Compile kernel (${{ matrix.defconfig }}_defconfig)
         run: |
-          set -o pipefail
+          set -euo pipefail
           export PATH="${CROSS_COMPILE%/*}:$PATH"
           mkdir -p out
 
           echo "::group::defconfig"
           make -s O=out ARCH=arm64 "${DEFCONFIG}_defconfig"
           echo "::endgroup::"
-
           test -f out/.config
-          grep -E "CONFIG_LOCALVERSION|CONFIG_BUILD_ARM64_DT_OVERLAY" out/.config || true
 
           echo "::group::make Image.gz-dtb"
           make O=out ARCH=arm64 -j"$(nproc)" \
@@ -92,9 +113,9 @@ jobs:
       - name: Package artifacts
         if: success()
         run: |
+          set -euo pipefail
           mkdir -p dist
           cp out/arch/arm64/boot/Image.gz-dtb "dist/Image.gz-dtb"
-          [ -f out/arch/arm64/boot/Image.gz ] && cp out/arch/arm64/boot/Image.gz dist/ || true
           cp out/.config "dist/config-${DEFCONFIG}"
           cp build.log dist/ 2>/dev/null || true
           {
