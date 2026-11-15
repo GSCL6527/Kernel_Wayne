@@ -1,0 +1,117 @@
+name: Kernel Build
+
+on:
+  push:
+    branches: [ tulip-p-oss ]
+    paths-ignore:
+      - '**.md'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: kernel-build-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: ${{ matrix.device }} (${{ matrix.defconfig }})
+    runs-on: ubuntu-latest
+    container:
+      image: ubuntu:20.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - defconfig: tulip-perf
+            device: tulip
+          - defconfig: wayne-perf
+            device: wayne
+    env:
+      ARCH: arm64
+      SUBARCH: arm64
+      KBUILD_BUILD_USER: gscl6527
+      KBUILD_BUILD_HOST: github-actions
+      DEFCONFIG: ${{ matrix.defconfig }}
+      CCACHE_DIR: /root/.ccache
+      CCACHE_MAXSIZE: 3G
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Install build dependencies
+        run: |
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update -qq
+          apt-get install -y -qq --no-install-recommends \
+            bc bison build-essential ca-certificates ccache cpio curl \
+            device-tree-compiler flex git libelf-dev libncurses5 libssl-dev \
+            python3 rsync unzip xz-utils zip
+
+      - name: Fetch AOSP GCC 4.9 aarch64 toolchain
+        run: |
+          TC_DIR=/tmp/toolchain
+          git clone --depth 1 \
+            https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9 \
+            "$TC_DIR" >/dev/null 2>&1
+          echo "CROSS_COMPILE=$TC_DIR/bin/aarch64-linux-android-" >> "$GITHUB_ENV"
+          "$TC_DIR/bin/aarch64-linux-android-gcc" --version | head -1
+
+      - name: Restore ccache
+        uses: actions/cache@v4
+        with:
+          path: /root/.ccache
+          key: ccache-${{ matrix.defconfig }}-${{ github.sha }}
+          restore-keys: |
+            ccache-${{ matrix.defconfig }}-
+
+      - name: Compile kernel (${{ matrix.defconfig }}_defconfig)
+        run: |
+          set -o pipefail
+          export PATH="${CROSS_COMPILE%/*}:$PATH"
+          mkdir -p out
+
+          echo "::group::defconfig"
+          make -s O=out ARCH=arm64 "${DEFCONFIG}_defconfig"
+          echo "::endgroup::"
+
+          test -f out/.config
+          grep -E "CONFIG_LOCALVERSION|CONFIG_BUILD_ARM64_DT_OVERLAY" out/.config || true
+
+          echo "::group::make Image.gz-dtb"
+          make O=out ARCH=arm64 -j"$(nproc)" \
+               CC="ccache ${CROSS_COMPILE}gcc" \
+               Image.gz-dtb 2>&1 | tee build.log
+          echo "::endgroup::"
+
+          ls -lh out/arch/arm64/boot/
+
+      - name: Package artifacts
+        if: success()
+        run: |
+          mkdir -p dist
+          cp out/arch/arm64/boot/Image.gz-dtb "dist/Image.gz-dtb"
+          [ -f out/arch/arm64/boot/Image.gz ] && cp out/arch/arm64/boot/Image.gz dist/ || true
+          cp out/.config "dist/config-${DEFCONFIG}"
+          cp build.log dist/ 2>/dev/null || true
+          {
+            echo "### ${{ matrix.device }} / ${DEFCONFIG}"
+            echo ""
+            echo "| file | size |"
+            echo "| --- | --- |"
+            ls -lh dist | awk 'NR>1 {print "| " $9 " | " $5 " |"}'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload kernel
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Kernel_Wayne-${{ matrix.device }}-${{ github.run_number }}
+          path: |
+            dist/*
+            build.log
+          if-no-files-found: warn
+          retention-days: 90
