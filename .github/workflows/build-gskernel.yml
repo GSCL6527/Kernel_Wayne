@@ -129,8 +129,11 @@ jobs:
 
           cp out/arch/arm64/boot/Image.gz-dtb ak3/
           mkdir -p dist
-          ( cd ak3 && zip -r9 "../dist/${ZIP_NAME}" . -x "*.zip" -x ".git/*" >/dev/null )
+          ( cd ak3 && zip -r9 "../dist/${ZIP_NAME}" * -x "*.zip" -x ".git/*" >/dev/null )
           ls -lh "dist/${ZIP_NAME}"
+          unzip -l "dist/${ZIP_NAME}" | grep -E "META-INF/com/google/android/(update-binary|updater-script)|Image.gz-dtb|anykernel.sh"
+          unzip -l "dist/${ZIP_NAME}" | grep -q "META-INF/com/google/android/update-binary" \
+            || { echo "::error::update-binary missing from zip"; exit 1; }
 
       - name: Collect artifacts
         if: success()
