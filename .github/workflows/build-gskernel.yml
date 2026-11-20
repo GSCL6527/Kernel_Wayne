@@ -1,0 +1,162 @@
+name: GSKernel Build (custom version)
+
+on:
+  push:
+    branches: [ tulip-p-oss ]
+    paths-ignore:
+      - '**.md'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gskernel-build-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: ${{ matrix.device }} (${{ matrix.defconfig }}) - GSKernel
+    runs-on: ubuntu-latest
+    container:
+      image: ubuntu:20.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - defconfig: wayne-perf
+            device: wayne
+    defaults:
+      run:
+        shell: bash
+    env:
+      ARCH: arm64
+      SUBARCH: arm64
+      # compile user / build host -> shows up as GSKernel@localhost in uname -a
+      KBUILD_BUILD_USER: GSKernel
+      KBUILD_BUILD_HOST: localhost
+      # version suffix -> 4.4.153-GSKernel-perf in Settings > About phone
+      LOCALVERSION_OVERRIDE: "-GSKernel-perf"
+      DEFCONFIG: ${{ matrix.defconfig }}
+      CCACHE_DIR: /root/.ccache
+      CCACHE_MAXSIZE: 3G
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Install build dependencies
+        run: |
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update -qq
+          apt-get install -y -qq --no-install-recommends \
+            bc bison build-essential ca-certificates ccache cpio curl \
+            device-tree-compiler file flex git lib32z1 lib32stdc++6 libc6-i386 \
+            libelf-dev libncurses5 libssl-dev python2 rsync unzip xz-utils zip
+          # AOSP gcc-4.9 driver is a python2 wrapper expecting /usr/bin/python
+          ln -sf /usr/bin/python2 /usr/bin/python
+          python --version
+
+      - name: Fetch AOSP GCC 4.9 aarch64 toolchain
+        run: |
+          set -euo pipefail
+          TC_DIR=/tmp/toolchain
+          rm -rf "$TC_DIR"
+
+          URLS=(
+            "https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9"
+            "https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9"
+            "https://github.com/AOSPA/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9"
+          )
+          ok=0
+          for url in "${URLS[@]}"; do
+            echo "--> trying $url"
+            if git clone --depth 1 "$url" "$TC_DIR" 2>&1 | tail -3; then
+              if [ -d "$TC_DIR/bin" ]; then ok=1; break; fi
+            fi
+            rm -rf "$TC_DIR"
+          done
+          if [ "$ok" != "1" ]; then echo "::error::could not fetch any aarch64 toolchain"; exit 1; fi
+
+          "$TC_DIR/bin/aarch64-linux-android-gcc" --version | head -1
+          echo "CROSS_COMPILE=$TC_DIR/bin/aarch64-linux-android-" >> "$GITHUB_ENV"
+
+      - name: Restore ccache
+        uses: actions/cache@v4
+        with:
+          path: /root/.ccache
+          key: ccache-gskernel-${{ matrix.defconfig }}-${{ github.sha }}
+          restore-keys: |
+            ccache-gskernel-${{ matrix.defconfig }}-
+            ccache-${{ matrix.defconfig }}-
+
+      - name: Compile kernel with custom version
+        run: |
+          set -euo pipefail
+          export PATH="${CROSS_COMPILE%/*}:$PATH"
+          mkdir -p out
+
+          make -s O=out ARCH=arm64 "${DEFCONFIG}_defconfig"
+          test -f out/.config
+
+          echo "::group::override CONFIG_LOCALVERSION"
+          ./scripts/config --file out/.config --set-str LOCALVERSION "${LOCALVERSION_OVERRIDE}"
+          grep -E '^CONFIG_LOCALVERSION=' out/.config
+          echo "::endgroup::"
+
+          make O=out ARCH=arm64 -j"$(nproc)" \
+               CC="ccache ${CROSS_COMPILE}gcc" \
+               Image.gz-dtb 2>&1 | tee build.log
+
+          echo "::group::version check"
+          echo "kernelrelease : $(cat out/include/config/kernel.release)"
+          grep -E 'LINUX_COMPILE_BY|LINUX_COMPILE_HOST|UTS_VERSION' out/include/generated/compile.h || true
+          echo "::endgroup::"
+
+      - name: Package AnyKernel3 flashable zip
+        run: |
+          set -euo pipefail
+          KREL=$(cat out/include/config/kernel.release)
+          ZIP_NAME="GSKernel-Wayne-${KREL}.zip"
+
+          git clone --depth 1 https://github.com/osm0sis/AnyKernel3.git ak3
+          rm -rf ak3/.git ak3/.github ak3/README.md
+
+          sed "s|@KERNEL_STRING@|GSKernel-perf by GSKernel|" \
+              .github/ak3/anykernel.sh > ak3/anykernel.sh
+          grep -E '^(kernel.string|device.name1|BLOCK)=' ak3/anykernel.sh
+
+          cp out/arch/arm64/boot/Image.gz-dtb ak3/
+          mkdir -p dist
+          ( cd ak3 && zip -r9 "../dist/${ZIP_NAME}" . -x "*.zip" -x ".git/*" >/dev/null )
+          ls -lh "dist/${ZIP_NAME}"
+
+      - name: Collect artifacts
+        if: success()
+        run: |
+          set -euo pipefail
+          cp out/arch/arm64/boot/Image.gz-dtb dist/
+          cp out/.config "dist/config-${DEFCONFIG}"
+          cp build.log dist/ 2>/dev/null || true
+          ls -lh dist
+          {
+            echo "### GSKernel / ${{ matrix.device }} / ${DEFCONFIG}"
+            echo ""
+            echo "kernelrelease: \`$(cat out/include/config/kernel.release)\`"
+            echo ""
+            echo "| file | size |"
+            echo "| --- | --- |"
+            ls -lh dist | awk 'NR>1 {print "| " $9 " | " $5 " |"}'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload kernel
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: GSKernel-Wayne-${{ matrix.device }}-${{ github.run_number }}
+          path: |
+            dist/*
+            build.log
+          if-no-files-found: warn
+          retention-days: 90

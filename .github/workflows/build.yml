@@ -76,12 +76,7 @@ jobs:
           done
           if [ "$ok" != "1" ]; then echo "::error::could not fetch any aarch64 toolchain"; exit 1; fi
 
-          echo "--- toolchain bin ---"
-          ls -la "$TC_DIR/bin" | head -15
-          echo "--- file type ---"
-          file "$TC_DIR/bin/aarch64-linux-android-gcc" || true
           "$TC_DIR/bin/aarch64-linux-android-gcc" --version | head -1
-
           echo "CROSS_COMPILE=$TC_DIR/bin/aarch64-linux-android-" >> "$GITHUB_ENV"
 
       - name: Restore ccache
@@ -98,27 +93,42 @@ jobs:
           export PATH="${CROSS_COMPILE%/*}:$PATH"
           mkdir -p out
 
-          echo "::group::defconfig"
           make -s O=out ARCH=arm64 "${DEFCONFIG}_defconfig"
-          echo "::endgroup::"
           test -f out/.config
 
-          echo "::group::make Image.gz-dtb"
           make O=out ARCH=arm64 -j"$(nproc)" \
                CC="ccache ${CROSS_COMPILE}gcc" \
                Image.gz-dtb 2>&1 | tee build.log
-          echo "::endgroup::"
 
-          ls -lh out/arch/arm64/boot/
+          echo "kernel release: $(cat out/include/config/kernel.release)"
+          ls -lh out/arch/arm64/boot/Image out/arch/arm64/boot/Image.gz-dtb
 
-      - name: Package artifacts
+      - name: Package AnyKernel3 flashable zip
+        run: |
+          set -euo pipefail
+          KREL=$(cat out/include/config/kernel.release)
+          ZIP_NAME="Kernel_Wayne-wayne-${KREL}.zip"
+
+          git clone --depth 1 https://github.com/osm0sis/AnyKernel3.git ak3
+          rm -rf ak3/.git ak3/.github ak3/README.md
+
+          sed "s|@KERNEL_STRING@|Kernel_Wayne by GSCL6527|" \
+              .github/ak3/anykernel.sh > ak3/anykernel.sh
+          grep -E '^(kernel.string|device.name1|BLOCK)=' ak3/anykernel.sh
+
+          cp out/arch/arm64/boot/Image.gz-dtb ak3/
+          mkdir -p dist
+          ( cd ak3 && zip -r9 "../dist/${ZIP_NAME}" . -x "*.zip" -x ".git/*" >/dev/null )
+          ls -lh "dist/${ZIP_NAME}"
+
+      - name: Collect artifacts
         if: success()
         run: |
           set -euo pipefail
-          mkdir -p dist
-          cp out/arch/arm64/boot/Image.gz-dtb "dist/Image.gz-dtb"
+          cp out/arch/arm64/boot/Image.gz-dtb dist/
           cp out/.config "dist/config-${DEFCONFIG}"
           cp build.log dist/ 2>/dev/null || true
+          ls -lh dist
           {
             echo "### ${{ matrix.device }} / ${DEFCONFIG}"
             echo ""
